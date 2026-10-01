@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warp2s5"
+version = "1.0.0"
+description = "Cloudflare WARP client in pure python that exposes a local SOCKS5 proxy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "warp2s5" }]
+keywords = ["cloudflare", "warp", "wireguard", "socks5", "proxy", "noise"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: Proxy Servers",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+warp2s5 = "warp2s5.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/"
+
+[tool.setuptools]
+packages = ["warp2s5"]
