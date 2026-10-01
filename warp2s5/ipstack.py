@@ -16,6 +16,7 @@ Everything is driven from the asyncio event loop: incoming packets arrive via
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import struct
@@ -96,8 +97,16 @@ class TcpConnection:
 
     def __init__(self, stack: "IPStack", dst_ip: str, dst_port: int, src_port: int) -> None:
         self.stack = stack
+        self.family = 6 if ":" in dst_ip else 4
+        # the connection table is keyed by this text, so normalise it: DNS
+        # and a parsed packet must produce identical strings, or replies
+        # are dropped as "no such connection"
+        if self.family == 6:
+            dst_ip = str(ipaddress.IPv6Address(dst_ip))
         self.dst_ip = dst_ip
-        self.dst_ip_b = P.ipv4_to_bytes(dst_ip)
+        self.dst_ip_b = (
+            P.ipv6_to_bytes(dst_ip) if self.family == 6 else P.ipv4_to_bytes(dst_ip)
+        )
         self.dst_port = dst_port
         self.src_port = src_port
 
@@ -193,12 +202,12 @@ class TcpConnection:
             self.rcv_nxt,
             flags,
             window,
-            self.stack.local_ip_bytes,
+            self.stack._local_bytes(self.dst_ip_b),
             self.dst_ip_b,
             payload,
             options,
         )
-        self.stack._send_ipv4(self.dst_ip_b, P.IPPROTO_TCP, segment)
+        self.stack._send(self.dst_ip_b, P.IPPROTO_TCP, segment)
         self.last_activity = time.monotonic()
         if TCP_TRACE:
             _tlog("TX %s:%d seq=%s ack=%s len=%d unacked=%d wnd=%d cwnd=%d",
@@ -221,11 +230,11 @@ class TcpConnection:
             self.rcv_nxt,
             record.flags,
             self._advertised_window(),
-            self.stack.local_ip_bytes,
+            self.stack._local_bytes(self.dst_ip_b),
             self.dst_ip_b,
             record.payload,
         )
-        self.stack._send_ipv4(self.dst_ip_b, P.IPPROTO_TCP, segment)
+        self.stack._send(self.dst_ip_b, P.IPPROTO_TCP, segment)
         record.last_sent = now
         record.retries += 1
         self.retransmits += 1
@@ -557,8 +566,16 @@ class UdpSocket:
 
     def __init__(self, stack: "IPStack", dst_ip: str, dst_port: int, src_port: int) -> None:
         self.stack = stack
+        self.family = 6 if ":" in dst_ip else 4
+        # the connection table is keyed by this text, so normalise it: DNS
+        # and a parsed packet must produce identical strings, or replies
+        # are dropped as "no such connection"
+        if self.family == 6:
+            dst_ip = str(ipaddress.IPv6Address(dst_ip))
         self.dst_ip = dst_ip
-        self.dst_ip_b = P.ipv4_to_bytes(dst_ip)
+        self.dst_ip_b = (
+            P.ipv6_to_bytes(dst_ip) if self.family == 6 else P.ipv4_to_bytes(dst_ip)
+        )
         self.dst_port = dst_port
         self.src_port = src_port
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -573,9 +590,10 @@ class UdpSocket:
         if self.closed:
             raise ValueError("socket is closed")
         packet = P.udp_pack(
-            self.src_port, self.dst_port, payload, self.stack.local_ip_bytes, self.dst_ip_b
+            self.src_port, self.dst_port, payload,
+            self.stack._local_bytes(self.dst_ip_b), self.dst_ip_b
         )
-        self.stack._send_ipv4(self.dst_ip_b, P.IPPROTO_UDP, packet)
+        self.stack._send(self.dst_ip_b, P.IPPROTO_UDP, packet)
 
     async def recvfrom(self, timeout: Optional[float] = None) -> tuple[bytes, tuple[str, int]]:
         try:
@@ -607,12 +625,16 @@ class IPStack:
         tunnel,
         local_ip: str,
         *,
+        local_ip_v6: str = "",
         mtu: int = 1280,
         on_log: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.tunnel = tunnel
         self.local_ip = local_ip
         self.local_ip_bytes = P.ipv4_to_bytes(local_ip)
+        #: the address WARP assigned for the inner IPv6 family (may be empty)
+        self.local_ip_v6 = local_ip_v6
+        self.local_ip_v6_bytes = P.ipv6_to_bytes(local_ip_v6) if local_ip_v6 else b""
         self.mtu = mtu
         self.mss = mtu - 40
         self.tcp: dict[tuple[str, int, int], TcpConnection] = {}
@@ -667,15 +689,47 @@ class IPStack:
     def _forget_udp(self, sock: UdpSocket) -> None:
         self.udp.pop(sock.key, None)
 
-    def _send_ipv4(self, dst_ip: bytes, proto: int, payload: bytes) -> None:
-        packet = P.ipv4_pack(self.local_ip_bytes, dst_ip, proto, payload)
+    @staticmethod
+    def _addr_str(raw: bytes) -> str:
+        """Bytes -> text, for either family.
+
+        Normalised through ``ipaddress`` so it matches whatever DNS handed us:
+        the connection table is keyed by this string, and a difference in
+        compression (``::1`` vs ``0:0:...:1``) would drop every reply.
+        """
+        if len(raw) == 16:
+            return str(ipaddress.IPv6Address(raw))
+        return P.bytes_to_ipv4(raw)
+
+    def _local_bytes(self, dst_ip: bytes) -> bytes:
+        """Source address matching the destination's family (16 bytes => IPv6)."""
+        if len(dst_ip) == 16:
+            if not self.local_ip_v6_bytes:
+                raise ConnectionError(
+                    "this device has no IPv6 address; cannot reach an IPv6 target"
+                )
+            return self.local_ip_v6_bytes
+        return self.local_ip_bytes
+
+    def _send(self, dst_ip: bytes, proto: int, payload: bytes) -> None:
+        """Build and inject a packet, IPv4 or IPv6 depending on the address."""
+        if len(dst_ip) == 16:
+            packet = P.ipv6_pack(self._local_bytes(dst_ip), dst_ip, proto, payload)
+        else:
+            packet = P.ipv4_pack(self.local_ip_bytes, dst_ip, proto, payload)
         if len(packet) > self.mtu + 40:
             log.debug("refusing to send oversized packet: %d bytes", len(packet))
         self.tunnel.send_ip(packet)
 
+    def _send_ipv4(self, dst_ip: bytes, proto: int, payload: bytes) -> None:
+        self._send(dst_ip, proto, payload)
+
     # ------------------------------------------------------------ inbound
     def _on_ip(self, packet: bytes) -> None:
-        parsed = P.ipv4_parse(packet)
+        if packet and (packet[0] >> 4) == 6:
+            parsed: P.IPv4Packet | P.IPv6Packet | None = P.ipv6_parse(packet)
+        else:
+            parsed = P.ipv4_parse(packet)
         if parsed is None:
             return
         if parsed.proto == P.IPPROTO_TCP:
@@ -691,7 +745,7 @@ class IPStack:
         seg = P.tcp_parse(packet.payload)
         if seg is None:
             return
-        src_ip = P.bytes_to_ipv4(packet.src)
+        src_ip = self._addr_str(packet.src)
         conn = self.tcp.get((src_ip, seg.sport, seg.dport))
         if conn is None:
             # nothing listening: tell the peer to go away
@@ -703,10 +757,10 @@ class IPStack:
                     (seg.seq + len(seg.payload) + (1 if seg.flags & SYN else 0)) & SEQ_MASK,
                     RST | (ACK if seg.flags & ACK else 0),
                     0,
-                    self.local_ip_bytes,
+                    self._local_bytes(packet.src),
                     packet.src,
                 )
-                self._send_ipv4(packet.src, P.IPPROTO_TCP, reset)
+                self._send(packet.src, P.IPPROTO_TCP, reset)
             return
         try:
             conn._on_segment(seg)
@@ -717,7 +771,7 @@ class IPStack:
         datagram = P.udp_parse(packet.payload)
         if datagram is None:
             return
-        src_ip = P.bytes_to_ipv4(packet.src)
+        src_ip = self._addr_str(packet.src)
         sock = self.udp.get((src_ip, datagram.sport, datagram.dport)) or self.udp.get(
             (src_ip, datagram.sport, 0)
         )
@@ -742,7 +796,7 @@ class IPStack:
             if inner.proto == P.IPPROTO_TCP:
                 seg = P.tcp_parse(inner.payload)
                 if seg is not None:
-                    conn = self.tcp.get((P.bytes_to_ipv4(inner.dst), seg.dport, seg.sport))
+                    conn = self.tcp.get((self._addr_str(inner.dst), seg.dport, seg.sport))
                     if conn is not None:
                         conn._on_icmp_unreachable()
             elif inner.proto == P.IPPROTO_UDP:

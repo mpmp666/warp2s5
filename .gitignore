@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 *.egg-info/
 build/
@@ -7,6 +7,8 @@ dist/
 venv/
 
 # ---- local-only debugging / deployment scripts, not part of the project ----
+*.bak
+*.bak.*
 tools/
 tests/
 

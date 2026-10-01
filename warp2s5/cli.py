@@ -130,7 +130,8 @@ async def _masque_carries_traffic(
     the only trustworthy check is: send a DNS query and see whether an answer
     comes back.
     """
-    stack = IPStack(tunnel, identity.address_v4, mtu=args.mtu)
+    stack = IPStack(tunnel, identity.address_v4,
+                        local_ip_v6=identity.address_v6, mtu=args.mtu)
     stack.start()
     try:
         resolver = DnsClient(stack, [args.dns.split(",")[0]], timeout=max(2.0, timeout / 2))
@@ -297,7 +298,8 @@ async def command_check(args: argparse.Namespace) -> int:
     )
     print(f"identity      : device {identity.device_id} ({identity.account_type or 'free'})")
     print(f"tunnel address: {identity.address_v4} (v6 {identity.address_v6})")
-    stack = IPStack(tunnel, identity.address_v4, mtu=args.mtu)
+    stack = IPStack(tunnel, identity.address_v4,
+                        local_ip_v6=identity.address_v6, mtu=args.mtu)
     stack.start()
 
     resolver = DnsClient(stack, args.dns.split(","), timeout=args.dns_timeout)
@@ -365,7 +367,8 @@ async def command_serve(args: argparse.Namespace) -> int:
 
     stack = getattr(tunnel, "verify_stack", None)
     if stack is None:
-        stack = IPStack(tunnel, identity.address_v4, mtu=args.mtu)
+        stack = IPStack(tunnel, identity.address_v4,
+                        local_ip_v6=identity.address_v6, mtu=args.mtu)
         stack.start()
     else:
         log.debug("reusing the verified stack (keeps the QUIC flow warm)")

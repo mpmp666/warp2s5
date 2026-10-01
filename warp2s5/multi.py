@@ -183,7 +183,8 @@ class WarpInstance:
                 await tunnel.stop()
                 continue
             transport = "masque"
-            stack = IPStack(tunnel, identity.address_v4, mtu=self.mtu)
+            stack = IPStack(tunnel, identity.address_v4,
+                            local_ip_v6=identity.address_v6, mtu=self.mtu)
             stack.start()
             resolver = DnsClient(stack, list(self.dns), timeout=7.0)
             try:

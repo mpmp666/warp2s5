@@ -147,8 +147,16 @@ class DnsClient:
             self._cache[name] = (now + self.cache_ttl, addresses)
         return addresses
 
-    async def _resolve_uncached(self, name: str) -> list[str]:
-        query, qid = build_query(name)
+    async def resolve_aaaa(self, name: str) -> list[str]:
+        """AAAA records (inner IPv6). Not cached: only used as a fallback."""
+        try:
+            return await self._resolve_uncached(name, QTYPE_AAAA)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AAAA lookup for %s failed: %s", name, exc)
+            return []
+
+    async def _resolve_uncached(self, name: str, qtype: int = QTYPE_A) -> list[str]:
+        query, qid = build_query(name, qtype=qtype)
         last_error: Optional[Exception] = None
         for server in self.servers:
             for attempt in range(2):
@@ -183,7 +191,7 @@ class DnsClient:
                 addresses = [
                     entry["address"]
                     for entry in parsed["answers"]
-                    if entry["type"] == QTYPE_A and "address" in entry
+                    if entry["type"] == qtype and "address" in entry
                 ]
                 if addresses:
                     log.debug("resolved %s -> %s (via %s)", name, addresses, server)

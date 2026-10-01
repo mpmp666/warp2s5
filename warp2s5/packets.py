@@ -132,9 +132,81 @@ def ipv4_parse(pkt: bytes) -> IPv4Packet | None:
     )
 
 
+def _pseudo_header(src_ip: bytes, dst_ip: bytes, proto: int, length: int) -> bytes:
+    """TCP/UDP checksum pseudo-header, for either address family.
+
+    IPv4 uses a 4+4 byte pseudo-header with a zero pad byte; IPv6 uses 16+16
+    plus a 32 bit length.  Picking the shape from the address length keeps the
+    existing IPv4 callers working unchanged.
+    """
+    if len(src_ip) == 16 or len(dst_ip) == 16:
+        return src_ip + dst_ip + struct.pack("!IBBBB", length, 0, 0, 0, proto)
+    return src_ip + dst_ip + struct.pack("!BBH", 0, proto, length)
+
+
+def ipv6_to_bytes(addr: str) -> bytes:
+    import ipaddress as _ipaddress
+
+    return _ipaddress.IPv6Address(addr).packed
+
+
+def bytes_to_ipv6(addr: bytes) -> str:
+    import ipaddress as _ipaddress
+
+    return str(_ipaddress.IPv6Address(addr))
+
+
+class IPv6Packet(NamedTuple):
+    src: bytes
+    dst: bytes
+    next_header: int
+    hop_limit: int
+    payload: bytes
+
+    @property
+    def proto(self) -> int:
+        """Same name as IPv4Packet.proto so callers can stay family agnostic."""
+        return self.next_header
+
+
+def ipv6_pack(
+    src_ip: bytes,
+    dst_ip: bytes,
+    next_header: int,
+    payload: bytes,
+    hop_limit: int = 64,
+    traffic_class: int = 0,
+    flow_label: int = 0,
+) -> bytes:
+    """Build an IPv6 packet.  ``src_ip``/``dst_ip`` are 16 byte addresses."""
+    version_tc_fl = (6 << 28) | ((traffic_class & 0xFF) << 20) | (flow_label & 0xFFFFF)
+    header = struct.pack(
+        "!IHBB", version_tc_fl, len(payload), next_header, hop_limit
+    ) + src_ip + dst_ip
+    return header + payload
+
+
+def ipv6_parse(pkt: bytes) -> IPv6Packet | None:
+    """Parse an IPv6 packet; returns None for anything that is not IPv6."""
+    if len(pkt) < 40 or (pkt[0] >> 4) != 6:
+        return None
+    version_tc_fl, payload_len, next_header, hop_limit = struct.unpack("!IHBB", pkt[:8])
+    del version_tc_fl
+    end = 40 + payload_len
+    if payload_len == 0 or end > len(pkt):
+        end = len(pkt)
+    return IPv6Packet(
+        src=pkt[8:24],
+        dst=pkt[24:40],
+        next_header=next_header,
+        hop_limit=hop_limit,
+        payload=pkt[40:end],
+    )
+
+
 def udp_pack(sport: int, dport: int, payload: bytes, src_ip: bytes, dst_ip: bytes) -> bytes:
     header = struct.pack("!HHHH", sport, dport, UDP_HEADER_LEN + len(payload), 0)
-    pseudo = src_ip + dst_ip + struct.pack("!BBH", 0, IPPROTO_UDP, len(header) + len(payload))
+    pseudo = _pseudo_header(src_ip, dst_ip, IPPROTO_UDP, len(header) + len(payload))
     csum = checksum(pseudo + header + payload)
     if csum == 0:
         csum = 0xFFFF
@@ -219,7 +291,7 @@ def tcp_pack(
         0,
     )
     segment = header + options + payload
-    pseudo = src_ip + dst_ip + struct.pack("!BBH", 0, IPPROTO_TCP, len(segment))
+    pseudo = _pseudo_header(src_ip, dst_ip, IPPROTO_TCP, len(segment))
     csum = checksum(pseudo + segment)
     return segment[:16] + struct.pack("!H", csum) + segment[18:]
 

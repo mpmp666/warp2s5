@@ -209,12 +209,16 @@ class Socks5Server:
         except ValueError:
             pass
         else:
-            if address.version == 6:
-                log.info("IPv6 destination %s is not supported by this stack", host)
-                return None
-            return host
+            # IPv6 literals are fine now that the stack handles both families:
+            # normalise the text so it matches the connection table keys
+            return str(address)
         try:
             addresses = await self.resolver.resolve(host)
+            if not addresses:
+                # IPv6-only host: ask for AAAA and let the stack route over v6
+                addresses = await self.resolver.resolve_aaaa(host)
+                if addresses:
+                    log.debug("%s has no A record, using IPv6 %s", host, addresses[0])
         except DnsError as exc:
             log.debug("DNS failure for %s: %s", host, exc)
             return None
