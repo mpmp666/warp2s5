@@ -75,8 +75,8 @@ TX len=338
   出口: ip=104.28.208.136  colo=LAX  warp=on
 ```
 
-`tools/warp_watch.py` 是常驻重试器：轮试端点/端口、只认"数据面真的通"、
-流被限速就换流、设备被限流就换设备，通了才起 SOCKS5。
+`python -m warp2s5 --webui` 起的就是常驻重试器：轮试端点/端口、只认"数据面真的通"、
+流被限速就换流、实例挂了自动重建，通了才起 SOCKS5。
 
 ---
 
@@ -104,7 +104,25 @@ POST /api/add             新增一个实例
 POST /api/remove?name=x   删除实例
 ```
 
-端点搜索器 `tools/endpoint_scan.py` 可以并发探测所有 (IP, 端口) 组合，只把"握手 + CONNECT-IP + 真 DNS 回包"都通过的端点算作可用。
+端点扫描是内置的（`warp2s5/scan.py`）：并发对每个 (IP, 端口) 组合做完整验证 ——
+握手 → CONNECT-IP → **在隧道里真发一个 DNS 查询并等真实回包**，只有收到回包的才算可用
+（这条线路上"握手成功 + 返回 200 但数据面全丢"是常态，只看握手会得出完全错误的结论）。
+每个候选连发 3 个探测包统计**丢包率**，结果按 **(丢包率, 延迟)** 排序，最好的排最前。
+
+**IPv6 端点是可以用的（实测 6/6）**，而且往往比 IPv4 更稳：
+
+```
+2606:4700:103::2:443    v6  YES    0%  208ms
+2606:4700:103::2:500    v6  YES    0%  208ms
+2606:4700:103::2:4500   v6  YES    0%  204ms
+2606:4700:103::2:8443   v6  YES    0%  209ms
+2606:4700:103::1:443    v6  YES    0%  209ms
+2606:4700:103::1:8443   v6  YES    0%  210ms
+162.159.198.2:443       v4  YES    0%  208ms
+```
+
+所以候选列表把 IPv6 排在前面。注意这只是**外层传输**走 IPv6；隧道内容仍然是 IPv4
+（用户态协议栈目前只实现 IPv4），所以出口看到的还是 Cloudflare 的 IPv4 地址。
 
 ---
 
@@ -221,21 +239,19 @@ python tests/test_cli_e2e.py        → 7/7 checks passed
 
 ---
 
-## 测试
+## 自检
 
 ```bash
-python tests/test_units.py            # 报文/BLAKE2s/DNS 单元测试，无需网络
-python tests/test_local_tunnel.py     # 需要 Go：本地 WireGuard 对端 + 本机源站端到端
-python tests/test_cli_e2e.py          # 需要 Go + curl：起 CLI 并用 curl 走 SOCKS5（含 HTTPS）
-python tests/test_wg_vector.py        # 需要 Go：握手报文与官方实现逐字节差分
-python tests/test_blake2s_go.py       # 需要 Go：BLAKE2s 交叉验证
-python tests/test_blake2s_node.py     # 需要 node：BLAKE2s/HMAC 交叉验证
-python tools/probe_masque_tunnel.py   # 对真实 WARP 的 MASQUE 端到端探针
-python tools/probe_masque_variants.py # MASQUE 协议变体实验（plain/addrreq/eager…）
-python tools/probe_quic.py            # 探测到 Cloudflare 的 QUIC/HTTP3 是否可达
+python -m warp2s5 --check                      # 注册设备 → 建隧道 → 隧道内 DNS → 隧道内 HTTP，打印出口 IP
+python -m warp2s5 --check --transport masque   # 只测 MASQUE
+python -m warp2s5 --check --transport wireguard
 ```
 
-Go 组件会自动 `go build`（国内建议 `GOPROXY=https://goproxy.cn`）。
+看到 `warp=on` 就说明流量确实从 WARP 出去了。
+
+开发过程中另有一整套测试（单元测试、本地 WireGuard 对端端到端、CLI + curl 走 SOCKS5、
+握手报文与 Go 官方实现逐字节差分、BLAKE2s 交叉验证），它们需要 Go / node 环境，
+没有随源码一起发布。
 
 ---
 
