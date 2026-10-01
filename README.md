@@ -190,26 +190,26 @@ warp2s5 -b 0.0.0.0:1080 --username u --password p
 
 ## 验证记录（本机实跑）
 
+> 下面这些是开发期在本地开发树上跑出来的，测试代码没有随源码发布。
+
 ### 1. 纯 Python 实现本身
 
 ```
-python tests/test_units.py          → Ran 15 tests ... OK
-python tests/test_blake2s_go.py     → 27 values vs golang.org/x/crypto/blake2s, failures=0
-python tests/test_blake2s_node.py   → 15 vectors vs node/OpenSSL, failures=0
-python tests/test_wg_vector.py      → handshake initiation vs an independent Go
-                                      implementation: chain_key/encrypted_static/
-                                      encrypted_timestamp/mac1/148-byte message/
-                                      transcript 全部一致, FAILURES: 0
+单元测试（报文/BLAKE2s/DNS）        → Ran 15 tests ... OK
+BLAKE2s vs golang.org/x/crypto      → 27 values, failures=0
+BLAKE2s/HMAC vs node/OpenSSL        → 15 vectors, failures=0
+WireGuard 握手 vs 独立 Go 实现      → chain_key/encrypted_static/encrypted_timestamp/
+                                      mac1/148 字节报文/transcript 全部逐字节一致, FAILURES: 0
 ```
 
-### 2. 整条链路（本机 WireGuard 对端 + 本机源站，可复现）
+### 2. 整条链路（本地 WireGuard 对端 + 本地源站，可复现）
 
 ```
-python tests/test_local_tunnel.py   → 10/10 checks passed
+本地端到端                          → 10/10 checks passed
   wireguard handshake / 小响应 / 300KB 下载(0 重传) / 200KB chunked /
   异常连接后仍可新建 / 5 个连续连接 / SOCKS5 CONNECT + 250KB /
   隧道内真实 DNS / 隧道内真实 HTTP / SOCKS5 域名访问
-python tests/test_cli_e2e.py        → 7/7 checks passed
+CLI + curl 走 SOCKS5                → 7/7 checks passed
   其中 curl 的 HTTPS（真 TLS）就跑在这个 Python 用户态 TCP 栈上
 ```
 
