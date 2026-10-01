@@ -6,7 +6,7 @@
 SOCKS5 客户端 → warp2s5 → [MASQUE(QUIC/443) 或 WireGuard(UDP/2408)] → WARP 出口 → 目标网站
 ```
 
-**全部用 Python 实现，用户态跑完整个协议栈**：WireGuard（Noise_IKpsk2 握手 + 传输加密）、**MASQUE（cf-connect-ip over HTTP/3 + QUIC + 客户端证书认证）**、IPv4/UDP/TCP 协议栈、隧道内 DNS、SOCKS5 服务端。**不需要 root/管理员权限，不需要 TUN/TAP 网卡，不需要 wireguard-go 等外部二进制**。
+**全部用 Python 实现，用户态跑完整个协议栈**：WireGuard（Noise_IKpsk2 握手 + 传输加密）、**MASQUE（cf-connect-ip over HTTP/3 + QUIC + 客户端证书认证）**、**IPv4/IPv6 + TCP/UDP 用户态协议栈**、隧道内 DNS、SOCKS5 服务端。**不需要 root/管理员权限，不需要 TUN/TAP 网卡，不需要 wireguard-go 等外部二进制**。
 
 依赖：`cryptography`（+ 用 MASQUE 时需要 `aioquic`）。
 
@@ -121,8 +121,32 @@ POST /api/remove?name=x   删除实例
 162.159.198.2:443       v4  YES    0%  208ms
 ```
 
-所以候选列表把 IPv6 排在前面。注意这只是**外层传输**走 IPv6；隧道内容仍然是 IPv4
-（用户态协议栈目前只实现 IPv4），所以出口看到的还是 Cloudflare 的 IPv4 地址。
+所以候选列表把 IPv6 排在前面。外层传输走 IPv6 还是 IPv4 与内层无关：
+**隧道内的流量也已经是双栈的**（见下节），到 IPv6 目标时会用设备分配到的 IPv6
+地址作源地址，出口拿到的是 Cloudflare 的 IPv6 地址。
+
+---
+
+## 双栈出口（IPv4 + IPv6）
+
+隧道内协议栈两个地址族都支持，SOCKS5 目标解析出 AAAA 时就走 IPv6：
+
+```
+$ curl -x socks5h://127.0.0.1:1080 https://api6.ipify.org
+2a09:bac5:22d9:78::c:3cf              # ← Cloudflare 的 IPv6 出口
+
+$ curl -x socks5h://127.0.0.1:1080 https://www.cloudflare.com/cdn-cgi/trace
+ip=104.28.192.133 warp=on             # ← IPv4 目标仍走 IPv4 出口
+```
+
+实现要点：
+
+* `packets.py` 提供 IPv6 报文封解包，TCP/UDP 校验和的伪首部按地址长度自动选形态
+* 设备的 IPv6 地址来自注册响应（`addresses.v6`），传给协议栈当源地址
+* DNS 先查 A，没有 A 记录时回退查 AAAA
+* 连接表以地址文本为键，两个方向都经 `ipaddress` 规范化 —— 否则
+  `2607:f2d8:1:3c:0:0:0:4`（DNS 返回）和 `2607:f2d8:1:3c::4`（报文解析）对不上，
+  对端回的 SYN-ACK 会被当成「没有这个连接」丢掉，表现为连接超时
 
 ---
 
@@ -178,7 +202,7 @@ warp2s5 -b 0.0.0.0:1080 --username u --password p
 | `warp2s5/masque.py` | **MASQUE 传输**：QUIC + TLS1.3（带客户端证书）、HTTP/3 扩展 CONNECT（`:protocol: cf-connect-ip`、`Capsule-Protocol: ?1`、`:authority: cloudflareaccess.com`）、IP 包按 QUIC datagram 收发、ADDRESS_ASSIGN 胶囊解析、keepalive/断线重连 |
 | `warp2s5/wireguard.py` | WireGuard 传输：Noise_IKpsk2 握手、ChaCha20-Poly1305 传输报文、重放窗口、重协商、keepalive、Cloudflare 的 3 字节 reserved 头 |
 | `warp2s5/blake2s.py` | 纯 Python BLAKE2s（RFC 7693，握手/HMAC-KDF/mac1 用） |
-| `warp2s5/packets.py` | IPv4 / UDP / TCP 报文编解码与校验和 |
+| `warp2s5/packets.py` | IPv4 / IPv6 / UDP / TCP 报文编解码与校验和（伪首部按地址族自适应） |
 | `warp2s5/ipstack.py` | 用户态协议栈：TCP 客户端（三次握手/滑动窗口/拥塞控制/重传/乱序重组/零窗口探测/半关闭）+ UDP + ICMP |
 | `warp2s5/dns.py` | 隧道内 DNS（UDP，截断自动走 TCP，带缓存） |
 | `warp2s5/socks5.py` | asyncio SOCKS5 服务端（RFC 1928/1929），CONNECT + 可选认证 |
@@ -259,12 +283,14 @@ python -m warp2s5 --check --transport wireguard
 
 * **`--check` 卡在 tunnel**：换传输试（`--transport masque` ↔ `--transport wireguard`）；WireGuard 可再试 `--endpoint 188.114.96.1 --port 2408`、`--family v6`、`--port 500`。
 * **MASQUE 隧道起来了但打不开网页**：就是上面第 3/4 条的现象（数据面被丢），换网络或换出口（VPS）再试。
-* **浏览器/curl 报 SOCKS5 错误码 8**：目标是 IPv6，本协议栈只支持 IPv4 目标；用 `curl -4` 或让客户端走域名（`socks5h`）。
+* **浏览器/curl 报 SOCKS5 错误码 8**：目标是 IPv6 且当前设备没拿到 IPv6 地址；
+  确认注册响应里有 `addresses.v6`，或让客户端走 `socks5h`（由代理侧解析域名）。
 * **`hashlib.blake2s` 卡死**：本项目自带纯 Python BLAKE2s，不依赖它（某些 CPython 3.14 构建里 `hashlib.blake2s` 会死循环）。
 
 ## 限制
 
-* 只支持 **IPv4 目标**（隧道内 IPv6 未实现；IPv6 目标会被拒绝）。
+* 隧道内 **IPv4 与 IPv6 都支持**；没有 ICMPv6（IPv6 目标不可达时只能等超时，不会快速失败）。
+* TCP over IPv6 的 MSS 目前仍按 IPv4 的 `mtu-40` 计算，裸 SYN 无影响，大数据量传输应改为 `mtu-60`。
 * SOCKS5 只实现 `CONNECT`（`UDP ASSOCIATE` 返回不支持，浏览器会回退 TCP）。
 * TCP 是教学级实现：有滑动窗口/拥塞控制/重传/乱序重组，但没有 SACK/时间戳，吞吐受 Python 解释器限制（单向几 Mbps～几十 Mbps），适合浏览/代理，不适合跑满带宽。
 * MASQUE 客户端证书是自签的，服务端证书不校验（SNI 与端点域名不同，官方客户端用固定公钥校验；本实现留待补充）。
